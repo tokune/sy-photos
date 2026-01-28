@@ -1,0 +1,24 @@
+{
+  "name": "photos",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts",
+    "scan": "PHOTOS_DIR=${PHOTOS_DIR:-./photos} bun index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "exifreader": "^4.36.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  }
+}
