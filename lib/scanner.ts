@@ -2,7 +2,10 @@
 import { readdir, stat } from "node:fs/promises";
 import { join, extname, basename, dirname } from "node:path";
 import ExifReader from "exifreader";
-import type { Photo, Album, Person, Location, SynologyMetadata } from "./types";
+import type { Photo, Album, Person, Location, SynologyMetadata, CachedPhoto, ScanCache } from "./types";
+
+const CACHE_VERSION = 1;
+const CACHE_FILENAME = ".photos-cache.json";
 
 const PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".bmp", ".tiff"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
@@ -14,17 +17,110 @@ export class PhotoScanner {
   private people: Map<string, Person> = new Map();
   private locations: Map<string, Location> = new Map();
   private indexed: boolean = false;
+  
+  // 缓存相关
+  private cachePath: string;
+  private cachedMtimes: Map<string, number> = new Map(); // path -> mtime
+  private scanStats = { total: 0, cached: 0, scanned: 0 };
 
   constructor(photosRoot: string) {
     this.photosRoot = photosRoot;
+    this.cachePath = join(photosRoot, CACHE_FILENAME);
   }
 
   async scan(): Promise<void> {
     console.log(`Scanning photos from: ${this.photosRoot}`);
+    
+    // 加载缓存
+    await this.loadCache();
+    
+    this.scanStats = { total: 0, cached: 0, scanned: 0 };
     await this.scanDirectory(this.photosRoot);
     this.indexed = true;
+    
+    // 保存缓存
+    await this.saveCache();
+    
     console.log(`Found ${this.photos.size} photos in ${this.albums.size} albums`);
     console.log(`Found ${this.people.size} people and ${this.locations.size} locations`);
+    console.log(`Scan stats: ${this.scanStats.cached} cached, ${this.scanStats.scanned} scanned, ${this.scanStats.total} total`);
+  }
+
+  // 加载缓存
+  private async loadCache(): Promise<void> {
+    try {
+      const cacheFile = Bun.file(this.cachePath);
+      if (!await cacheFile.exists()) {
+        console.log("No cache file found, will scan all photos");
+        return;
+      }
+
+      const cache: ScanCache = await cacheFile.json();
+      
+      // 验证缓存版本和路径
+      if (cache.version !== CACHE_VERSION || cache.photosRoot !== this.photosRoot) {
+        console.log("Cache version mismatch or different path, will rescan");
+        return;
+      }
+
+      // 恢复缓存的照片数据
+      for (const [id, cachedPhoto] of Object.entries(cache.photos)) {
+        this.cachedMtimes.set(cachedPhoto.path, cachedPhoto.mtime);
+        
+        // 转换回 Photo 对象
+        const photo: Photo = {
+          ...cachedPhoto,
+          takenAt: cachedPhoto.takenAt ? new Date(cachedPhoto.takenAt) : undefined,
+        };
+        delete (photo as unknown as Record<string, unknown>)['mtime'];
+        
+        this.photos.set(id, photo);
+        
+        // 重建人物索引
+        if (photo.people) {
+          for (const personName of photo.people) {
+            this.addPersonPhoto(personName, photo);
+          }
+        }
+        
+        // 重建地点索引
+        if (photo.locationName && photo.latitude && photo.longitude) {
+          this.addLocationPhoto(photo.locationName, photo);
+        }
+      }
+
+      console.log(`Loaded ${this.photos.size} photos from cache (${cache.lastScan})`);
+    } catch (error) {
+      console.error("Failed to load cache:", error);
+    }
+  }
+
+  // 保存缓存
+  private async saveCache(): Promise<void> {
+    try {
+      const cachedPhotos: Record<string, CachedPhoto> = {};
+      
+      for (const [id, photo] of this.photos) {
+        const mtime = this.cachedMtimes.get(photo.path) || 0;
+        cachedPhotos[id] = {
+          ...photo,
+          takenAt: photo.takenAt?.toISOString(),
+          mtime,
+        };
+      }
+
+      const cache: ScanCache = {
+        version: CACHE_VERSION,
+        photosRoot: this.photosRoot,
+        lastScan: new Date().toISOString(),
+        photos: cachedPhotos,
+      };
+
+      await Bun.write(this.cachePath, JSON.stringify(cache, null, 2));
+      console.log(`Saved cache with ${Object.keys(cachedPhotos).length} photos`);
+    } catch (error) {
+      console.error("Failed to save cache:", error);
+    }
   }
 
   private async scanDirectory(dir: string, albumName?: string): Promise<void> {
@@ -63,8 +159,25 @@ export class PhotoScanner {
   private async processPhoto(filePath: string, albumName?: string): Promise<void> {
     const id = this.generateId(filePath);
     const filename = basename(filePath);
+    this.scanStats.total++;
 
     try {
+      // 检查文件是否已缓存且未修改
+      const fileStat = await stat(filePath);
+      const currentMtime = fileStat.mtimeMs;
+      const cachedMtime = this.cachedMtimes.get(filePath);
+      
+      // 如果缓存存在且 mtime 相同，跳过扫描
+      if (cachedMtime && cachedMtime === currentMtime && this.photos.has(id)) {
+        this.scanStats.cached++;
+        // 更新 mtime 以便保存
+        this.cachedMtimes.set(filePath, currentMtime);
+        return;
+      }
+
+      // 需要重新扫描
+      this.scanStats.scanned++;
+      
       const photo: Photo = {
         id,
         path: filePath,
@@ -91,6 +204,7 @@ export class PhotoScanner {
       }
 
       this.photos.set(id, photo);
+      this.cachedMtimes.set(filePath, currentMtime);
     } catch (error) {
       // 即使解析失败也添加基本信息
       this.photos.set(id, {
@@ -251,15 +365,18 @@ export class PhotoScanner {
       .map(p => p.takenAt!.getTime())
       .sort((a, b) => a - b);
 
+    const firstDate = dates[0];
+    const lastDate = dates[dates.length - 1];
+
     this.albums.set(albumName, {
       id: Buffer.from(albumName).toString("base64url"),
       name: albumName,
       path,
       coverPhoto: photos[0]?.id,
       photoCount: photos.length,
-      dateRange: dates.length > 0 ? {
-        start: new Date(dates[0]),
-        end: new Date(dates[dates.length - 1]),
+      dateRange: firstDate !== undefined && lastDate !== undefined ? {
+        start: new Date(firstDate),
+        end: new Date(lastDate),
       } : undefined,
     });
   }

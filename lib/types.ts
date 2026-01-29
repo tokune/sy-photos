@@ -110,3 +110,16 @@ export interface SynologyMetadata {
   // 拍摄时间 (ISO 字符串或时间戳)
   takenAt?: string | number;
 }
+
+// 缓存数据结构
+export interface CachedPhoto extends Omit<Photo, 'takenAt'> {
+  takenAt?: string; // JSON 序列化为 ISO 字符串
+  mtime: number;    // 文件修改时间戳，用于检测变更
+}
+
+export interface ScanCache {
+  version: number;
+  photosRoot: string;
+  lastScan: string;
+  photos: Record<string, CachedPhoto>;
+}
