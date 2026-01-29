@@ -135,7 +135,7 @@ async function generateSampleData() {
 
         // 随机选择地点 (70% 概率有地点)
         const location = Math.random() > 0.3
-          ? sampleLocations[Math.floor(Math.random() * sampleLocations.length)]
+          ? sampleLocations[Math.floor(Math.random() * sampleLocations.length)] ?? null
           : null;
 
         // 写入元数据（包含日期）

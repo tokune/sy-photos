@@ -10,21 +10,24 @@ const PORT = parseInt(process.env.PORT || "3000");
 
 // 初始化扫描器和故事生成器
 const scanner = new PhotoScanner(PHOTOS_DIR);
-let storyGenerator: StoryGenerator;
-
-// 启动时扫描照片
-console.log("Starting photo gallery server...");
-await scanner.scan();
-storyGenerator = new StoryGenerator(scanner);
+let storyGenerator: StoryGenerator | null = null;
 
 // 缓存已生成的故事
-let cachedStories = storyGenerator.generateMultipleStories(10);
-const storiesLastGenerated = new Date();
+let cachedStories: ReturnType<StoryGenerator["generateMultipleStories"]> = [];
 
-// 每小时刷新故事
-setInterval(() => {
+// 后台扫描照片（不阻塞服务器启动）
+console.log("Starting photo gallery server...");
+scanner.scan().then(() => {
+  storyGenerator = new StoryGenerator(scanner);
   cachedStories = storyGenerator.generateMultipleStories(10);
-}, 60 * 60 * 1000);
+  
+  // 每小时刷新故事
+  setInterval(() => {
+    if (storyGenerator) {
+      cachedStories = storyGenerator.generateMultipleStories(10);
+    }
+  }, 60 * 60 * 1000);
+});
 
 // API 响应辅助函数
 function jsonResponse(data: unknown, status = 200) {
@@ -98,6 +101,9 @@ Bun.serve({
 
     // API: 生成新的随机故事
     "/api/stories/random": () => {
+      if (!storyGenerator) {
+        return errorResponse("Scanning in progress, please wait", 503);
+      }
       const story = storyGenerator.generateRandomStory();
       if (!story) {
         return errorResponse("No stories available", 404);
@@ -107,12 +113,18 @@ Bun.serve({
 
     // API: 刷新所有故事
     "/api/stories/refresh": () => {
+      if (!storyGenerator) {
+        return errorResponse("Scanning in progress, please wait", 503);
+      }
       cachedStories = storyGenerator.generateMultipleStories(10);
       return jsonResponse({ stories: cachedStories });
     },
 
     // API: 获取"今天"的故事
     "/api/stories/today": () => {
+      if (!storyGenerator) {
+        return errorResponse("Scanning in progress, please wait", 503);
+      }
       const story = storyGenerator.generateYearsAgoStory();
       if (!story) {
         return jsonResponse({ story: null, message: "今天没有历史回忆" });
@@ -122,6 +134,9 @@ Bun.serve({
 
     // API: 获取指定日期的故事
     "/api/stories/date/:date": (req) => {
+      if (!storyGenerator) {
+        return errorResponse("Scanning in progress, please wait", 503);
+      }
       const dateStr = req.params.date;
       const date = new Date(dateStr);
       if (isNaN(date.getTime())) {
@@ -198,17 +213,32 @@ Bun.serve({
         totalLocations: scanner.getAllLocations().length,
         yearRange: years.length > 0 ? { start: years[0], end: years[years.length - 1] } : null,
         storiesCount: cachedStories.length,
+        scanStatus: scanner.getScanStatus(),
       });
     },
 
     // 重新扫描照片
     "/api/rescan": async () => {
+      const status = scanner.getScanStatus();
+      if (status.scanning) {
+        return errorResponse("Scan already in progress", 409);
+      }
       await scanner.scan();
-      cachedStories = storyGenerator.generateMultipleStories(10);
+      if (storyGenerator) {
+        cachedStories = storyGenerator.generateMultipleStories(10);
+      } else {
+        storyGenerator = new StoryGenerator(scanner);
+        cachedStories = storyGenerator.generateMultipleStories(10);
+      }
       return jsonResponse({ message: "Rescan complete", stats: {
         photos: scanner.getAllPhotos().length,
         albums: scanner.getAllAlbums().length,
       }});
+    },
+    
+    // 扫描状态
+    "/api/scan/status": () => {
+      return jsonResponse(scanner.getScanStatus());
     },
   },
 

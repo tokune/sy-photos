@@ -6,9 +6,20 @@ import type { Photo, Album, Person, Location, SynologyMetadata, CachedPhoto, Sca
 
 const CACHE_VERSION = 1;
 const CACHE_FILENAME = ".photos-cache.json";
+const CACHE_SAVE_INTERVAL = 100; // 每扫描 100 张照片保存一次缓存
 
 const PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".bmp", ".tiff"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
+
+export interface ScanStatus {
+  scanning: boolean;
+  total: number;
+  cached: number;
+  scanned: number;
+  currentDir?: string;
+  startTime?: Date;
+  endTime?: Date;
+}
 
 export class PhotoScanner {
   private photosRoot: string;
@@ -22,6 +33,15 @@ export class PhotoScanner {
   private cachePath: string;
   private cachedMtimes: Map<string, number> = new Map(); // path -> mtime
   private scanStats = { total: 0, cached: 0, scanned: 0 };
+  private lastCacheSave = 0; // 上次保存缓存时的扫描数
+  
+  // 扫描状态
+  private scanStatus: ScanStatus = {
+    scanning: false,
+    total: 0,
+    cached: 0,
+    scanned: 0,
+  };
 
   constructor(photosRoot: string) {
     this.photosRoot = photosRoot;
@@ -31,19 +51,45 @@ export class PhotoScanner {
   async scan(): Promise<void> {
     console.log(`Scanning photos from: ${this.photosRoot}`);
     
+    // 更新扫描状态
+    this.scanStatus = {
+      scanning: true,
+      total: 0,
+      cached: 0,
+      scanned: 0,
+      startTime: new Date(),
+    };
+    
     // 加载缓存
     await this.loadCache();
     
     this.scanStats = { total: 0, cached: 0, scanned: 0 };
+    this.lastCacheSave = 0;
+    
     await this.scanDirectory(this.photosRoot);
     this.indexed = true;
     
-    // 保存缓存
+    // 最终保存缓存
     await this.saveCache();
+    
+    // 更新扫描状态
+    this.scanStatus = {
+      scanning: false,
+      total: this.scanStats.total,
+      cached: this.scanStats.cached,
+      scanned: this.scanStats.scanned,
+      startTime: this.scanStatus.startTime,
+      endTime: new Date(),
+    };
     
     console.log(`Found ${this.photos.size} photos in ${this.albums.size} albums`);
     console.log(`Found ${this.people.size} people and ${this.locations.size} locations`);
     console.log(`Scan stats: ${this.scanStats.cached} cached, ${this.scanStats.scanned} scanned, ${this.scanStats.total} total`);
+  }
+  
+  // 获取扫描状态
+  getScanStatus(): ScanStatus {
+    return { ...this.scanStatus };
   }
 
   // 加载缓存
@@ -125,6 +171,9 @@ export class PhotoScanner {
 
   private async scanDirectory(dir: string, albumName?: string): Promise<void> {
     try {
+      // 更新当前扫描目录
+      this.scanStatus.currentDir = dir.replace(this.photosRoot, "") || "/";
+      
       const entries = await readdir(dir, { withFileTypes: true });
 
       for (const entry of entries) {
@@ -143,6 +192,9 @@ export class PhotoScanner {
           const ext = extname(entry.name).toLowerCase();
           if (PHOTO_EXTENSIONS.has(ext)) {
             await this.processPhoto(fullPath, albumName);
+            
+            // 增量保存缓存
+            await this.maybeSaveCache();
           }
         }
       }
@@ -155,11 +207,21 @@ export class PhotoScanner {
       console.error(`Error scanning directory ${dir}:`, error);
     }
   }
+  
+  // 增量保存缓存
+  private async maybeSaveCache(): Promise<void> {
+    const scannedSinceLastSave = this.scanStats.scanned - this.lastCacheSave;
+    if (scannedSinceLastSave >= CACHE_SAVE_INTERVAL) {
+      await this.saveCache();
+      this.lastCacheSave = this.scanStats.scanned;
+    }
+  }
 
   private async processPhoto(filePath: string, albumName?: string): Promise<void> {
     const id = this.generateId(filePath);
     const filename = basename(filePath);
     this.scanStats.total++;
+    this.scanStatus.total = this.scanStats.total;
 
     try {
       // 检查文件是否已缓存且未修改
@@ -170,6 +232,7 @@ export class PhotoScanner {
       // 如果缓存存在且 mtime 相同，跳过扫描
       if (cachedMtime && cachedMtime === currentMtime && this.photos.has(id)) {
         this.scanStats.cached++;
+        this.scanStatus.cached = this.scanStats.cached;
         // 更新 mtime 以便保存
         this.cachedMtimes.set(filePath, currentMtime);
         return;
@@ -177,6 +240,7 @@ export class PhotoScanner {
 
       // 需要重新扫描
       this.scanStats.scanned++;
+      this.scanStatus.scanned = this.scanStats.scanned;
       
       const photo: Photo = {
         id,

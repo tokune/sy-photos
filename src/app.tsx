@@ -271,6 +271,8 @@ function PhotoViewer({
     return () => window.removeEventListener("keydown", handleKeydown);
   }, [currentIndex, photos.length, onClose, onNavigate]);
 
+  if (!photo) return null;
+
   return (
     <div className="photo-viewer">
       <div className="photo-viewer-header">

@@ -66,6 +66,7 @@ export class StoryGenerator {
     // 选择一个年份
     const years = Array.from(photosOnThisDay.keys()).sort((a, b) => a - b);
     const randomYear = years[Math.floor(Math.random() * years.length)];
+    if (randomYear === undefined) return null;
     const yearsAgo = today.getFullYear() - randomYear;
     const photos = photosOnThisDay.get(randomYear)!;
 
@@ -285,6 +286,7 @@ export class StoryGenerator {
     // 选择一个随机年份
     const years = Array.from(byYear.keys());
     const randomYear = years[Math.floor(Math.random() * years.length)];
+    if (randomYear === undefined) return null;
     const photos = byYear.get(randomYear)!;
 
     const locations = [...new Set(photos.map(p => p.locationName).filter(Boolean))];
@@ -298,8 +300,8 @@ export class StoryGenerator {
       createdAt: new Date(),
       metadata: {
         dateRange: {
-          start: new Date(randomYear, seasonMonths[0], 1),
-          end: new Date(randomYear, seasonMonths[2], 28),
+          start: new Date(randomYear, seasonMonths[0]!, 1),
+          end: new Date(randomYear, seasonMonths[2]!, 28),
         },
       },
     };
@@ -368,7 +370,9 @@ export class StoryGenerator {
     const result = [...array];
     for (let i = result.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [result[i], result[j]] = [result[j], result[i]];
+      const temp = result[i]!;
+      result[i] = result[j]!;
+      result[j] = temp;
     }
     return result;
   }
